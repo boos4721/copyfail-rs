@@ -1,0 +1,10 @@
+[package]
+name = "copyfail-rs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+flate2 = "1"
+thiserror = "2"
+libc = "0.2"
