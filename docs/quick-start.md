@@ -46,6 +46,32 @@ read-only open as current user: yes
 printf '%s\n' 'mypassword' | ./copyfail-rs --set-password
 ```
 
+## 故障排查 / Troubleshooting
+
+如果看到：
+
+```text
+required AF_ALG crypto algorithm is unavailable: authencesn(hmac(sha256),cbc(aes))
+```
+
+说明目标内核没有注册漏洞触发所需的 crypto API 算法。可先检查：
+
+```bash
+grep -F 'authencesn(hmac(sha256),cbc(aes))' /proc/crypto
+```
+
+若没有输出，尝试在授权测试环境中加载相关模块后再运行：
+
+```bash
+sudo modprobe authencesn || sudo modprobe authenc
+sudo modprobe hmac
+sudo modprobe sha256_generic
+sudo modprobe cbc
+sudo modprobe aes
+```
+
+If the required AF_ALG algorithm is not listed in `/proc/crypto`, the exploit primitive cannot start on that kernel until the needed crypto modules are available.
+
 ## 恢复 / Recovery
 
 ```bash

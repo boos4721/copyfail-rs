@@ -8,83 +8,143 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
-      - run: cargo fmt --check
-      - run: cargo clippy -- -D warnings
-      - run: cargo test
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check
+        run: cargo check --all-targets
+
+      - name: Rustfmt
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --all-targets --all-features
 
   build:
     needs: check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
-            artifact: copyfail-rs-x86_64-musl
+            artifact: copyfail-rs-x86_64-unknown-linux-musl
+            binary_path: target/x86_64-unknown-linux-musl/release/copyfail-rs
+            build_kind: cargo
           - target: x86_64-unknown-linux-gnu
-            artifact: copyfail-rs-x86_64-glibc
+            artifact: copyfail-rs-x86_64-unknown-linux-gnu
+            binary_path: target/release/copyfail-rs
+            build_kind: docker-gnu
           - target: aarch64-unknown-linux-musl
-            artifact: copyfail-rs-aarch64-musl
+            artifact: copyfail-rs-aarch64-unknown-linux-musl
+            binary_path: target/aarch64-unknown-linux-musl/release/copyfail-rs
+            build_kind: zig
           - target: aarch64-unknown-linux-gnu
-            artifact: copyfail-rs-aarch64-glibc
-
+            artifact: copyfail-rs-aarch64-unknown-linux-gnu
+            binary_path: target/aarch64-unknown-linux-gnu/release/copyfail-rs
+            build_kind: zig
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        if: matrix.build_kind != 'docker-gnu'
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cross-compilation dependencies
-        run: |
-          sudo apt-get update
-          case "${{ matrix.target }}" in
-            *-musl)   sudo apt-get install -y musl-tools ;;
-            aarch64*) sudo apt-get install -y gcc-aarch64-linux-gnu ;;
-          esac
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
-      - name: Build (native glibc)
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
+      - name: Install musl tools
+        if: matrix.build_kind == 'cargo'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Setup zig
+        if: matrix.build_kind == 'zig'
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.14.0
+
+      - name: Install cargo-zigbuild
+        if: matrix.build_kind == 'zig'
+        run: cargo install cargo-zigbuild --locked
+
+      - name: Build release with cargo
+        if: matrix.build_kind == 'cargo'
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Build (cross via cross)
-        if: matrix.target != 'x86_64-unknown-linux-gnu'
-        uses: cross-rs/cross-action@v2
+      - name: Build release with old glibc baseline
+        if: matrix.build_kind == 'docker-gnu'
+        uses: addnab/docker-run-action@v3
         with:
-          command: build
-          args: --release --target ${{ matrix.target }}
+          image: rust:1-bullseye
+          options: -v ${{ github.workspace }}:/work -w /work
+          run: cargo build --release
 
-      - name: Prepare artifact
+      - name: Build release with zigbuild
+        if: matrix.build_kind == 'zig'
+        run: cargo zigbuild --release --target ${{ matrix.target }}
+
+      - name: Stage artifact
         run: |
-          cp target/${{ matrix.target }}/release/copyfail-rs ${{ matrix.artifact }}
-          chmod +x ${{ matrix.artifact }}
+          mkdir -p staged
+          cp "${{ matrix.binary_path }}" "staged/${{ matrix.artifact }}"
+          chmod +x "staged/${{ matrix.artifact }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}
+          path: staged/${{ matrix.artifact }}
+          if-no-files-found: error
 
   release:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     permissions:
       contents: write
     steps:
-      - name: Download all artifacts
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
 
-      - name: Create GitHub Release
+      - name: Flatten artifacts
+        run: |
+          mkdir -p staged
+          find artifacts -mindepth 2 -type f -print0 | while IFS= read -r -d '' f; do
+            cp "$f" "staged/$(basename "$f")"
+          done
+          ls -la staged/
+
+      - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*
+          files: staged/*
           generate_release_notes: true
+          overwrite_files: true

